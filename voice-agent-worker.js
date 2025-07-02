@@ -1,4 +1,4 @@
-// ENHANCED VOICE AGENT WORKER v12.2.0 - WITH AUDIO CACHE INTEGRATION (FULL FEATURED)
+// ENHANCED VOICE AGENT WORKER v14.1.0 - WITH DETAILED TIMING LOGS
 // Deploy to: https://voice-agent-worker.metabilityllc1.workers.dev/
 
 // Environment Variables needed:
@@ -16,7 +16,7 @@
 // DATABASE_SERVICE (bound to database-worker)
 
 // =============================================================================
-// ENVIRONMENT VALIDATION - QUICK WIN #1
+// ENVIRONMENT VALIDATION
 // =============================================================================
 
 function validateEnvironment(env) {
@@ -40,7 +40,7 @@ function validateEnvironment(env) {
 }
 
 // =============================================================================
-// CIRCUIT BREAKER PATTERN - QUICK WIN #2
+// CIRCUIT BREAKER PATTERN
 // =============================================================================
 
 class CircuitBreaker {
@@ -49,7 +49,7 @@ class CircuitBreaker {
     this.failureCount = 0;
     this.threshold = threshold;
     this.timeout = timeout;
-    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+    this.state = 'CLOSED';
     this.nextAttempt = Date.now();
   }
 
@@ -94,7 +94,7 @@ class CircuitBreaker {
 }
 
 // =============================================================================
-// ENHANCED ERROR RESPONSES - QUICK WIN #3
+// ENHANCED ERROR RESPONSES
 // =============================================================================
 
 class ErrorResponseManager {
@@ -127,7 +127,7 @@ class ErrorResponseManager {
 }
 
 // =============================================================================
-// STRUCTURED LOGGING - QUICK WIN #4
+// STRUCTURED LOGGING WITH TWILIO LATENCY
 // =============================================================================
 
 class StructuredLogger {
@@ -166,10 +166,14 @@ class StructuredLogger {
   static cache(operation, context = {}) {
     this.log('cache', `Audio cache ${operation}`, context);
   }
+
+  static twilio(operation, context = {}) {
+    this.log('twilio', `Twilio ${operation}`, context);
+  }
 }
 
 // =============================================================================
-// ENHANCED PERFORMANCE MONITORING - QUICK WIN #5
+// ENHANCED PERFORMANCE MONITORING WITH TWILIO TRACKING
 // =============================================================================
 
 class EnhancedPerformanceMonitor {
@@ -185,7 +189,6 @@ class EnhancedPerformanceMonitor {
       ...context
     });
 
-    // Alert thresholds
     if (duration > 2000) {
       StructuredLogger.error(`Performance alert: ${stage} exceeded 2s`, {
         stage,
@@ -213,7 +216,6 @@ class EnhancedPerformanceMonitor {
       ...context
     });
 
-    // Performance alerts
     if (totalTime > 3000) {
       StructuredLogger.error('Critical: Voice call exceeded 3s', {
         call_sid: callSid,
@@ -231,6 +233,28 @@ class EnhancedPerformanceMonitor {
     }
 
     return totalTime;
+  }
+
+  static logTwilioLatency(operation, duration, context = {}) {
+    StructuredLogger.twilio(`${operation} latency`, {
+      ...context,
+      duration_ms: duration,
+      twilio_performance_category: duration > 200 ? 'slow' : duration > 100 ? 'moderate' : 'fast'
+    });
+
+    if (duration > 500) {
+      StructuredLogger.error(`Twilio ${operation} exceeded 500ms`, {
+        duration_ms: duration,
+        alert_type: 'twilio_latency_critical',
+        ...context
+      });
+    } else if (duration > 200) {
+      StructuredLogger.warn(`Twilio ${operation} exceeded 200ms`, {
+        duration_ms: duration,
+        alert_type: 'twilio_latency_warning',
+        ...context
+      });
+    }
   }
 }
 
@@ -277,7 +301,7 @@ class DirectSupabaseClient {
 }
 
 // =============================================================================
-// RESPONSE AUDIO MATCHER - INTELLIGENT MATCHING
+// RESPONSE AUDIO MATCHER - WITH CONVERSATION FLOW DETECTION
 // =============================================================================
 
 class ResponseAudioMatcher {
@@ -339,6 +363,38 @@ class ResponseAudioMatcher {
         'full name', 'address', 'appliance', 'scheduled faster'
       ]
     };
+    
+    this.conversationFlowPatterns = [
+      'i can help with your',
+      'i just need',
+      'what city and zip',
+      'best callback number',
+      'morning or afternoon',
+      'preferred time',
+      'what\'s your full name',
+      'what\'s your address',
+      'what brand is your',
+      'what\'s happening with',
+      'what\'s wrong with',
+      'what type of appliance',
+      'perfect! i have'
+    ];
+  }
+
+  isConversationFlowResponse(aiResponse) {
+    if (!aiResponse) return false;
+    
+    // Don't skip cache for FAQ diagnostic responses
+    if (aiResponse.includes('diagnostic fee') || 
+        aiResponse.includes('$89') || 
+        aiResponse.includes('repair')) {
+      return false;
+    }
+    
+    const responseLower = aiResponse.toLowerCase();
+    return this.conversationFlowPatterns.some(pattern => 
+      responseLower.includes(pattern)
+    );
   }
 
   findBestMatch(aiResponse, audioCache) {
@@ -346,28 +402,33 @@ class ResponseAudioMatcher {
       return null;
     }
 
+    if (this.isConversationFlowResponse(aiResponse)) {
+      StructuredLogger.cache('conversation_flow_detected', {
+        response_preview: aiResponse.substring(0, 50),
+        skip_cache_matching: true
+      });
+      return null;
+    }
+
     const responseLower = aiResponse.toLowerCase();
     let bestMatch = null;
     let bestScore = 0;
 
-    // Check each cached audio template
     for (const [templateKey, audioUrl] of Object.entries(audioCache)) {
       const keywords = this.matchingRules[templateKey] || [];
       let score = 0;
 
-      // Calculate matching score
       for (const keyword of keywords) {
         if (responseLower.includes(keyword.toLowerCase())) {
-          score += keyword.length; // Longer matches get higher scores
+          score += keyword.length;
         }
       }
 
-      // Bonus for exact phrase matches
       if (keywords.some(keyword => responseLower === keyword.toLowerCase())) {
         score += 50;
       }
 
-      if (score > bestScore && score > 5) { // Minimum threshold
+      if (score > bestScore && score > 5) {
         bestScore = score;
         bestMatch = {
           templateKey,
@@ -397,17 +458,16 @@ class ResponseAudioMatcher {
 }
 
 // =============================================================================
-// AUDIO CACHE MANAGER - NEW FEATURE
+// AUDIO CACHE MANAGER
 // =============================================================================
 
 class AudioCacheManager {
   constructor(db, directDb) {
     this.db = db;
-    this.directDb = directDb; // Direct Supabase for audio assets
+    this.directDb = directDb;
     this.responseMatching = new ResponseAudioMatcher();
   }
 
-  // Get cached audio URL for a specific template
   async getCachedAudio(organizationId, templateKey) {
     try {
       StructuredLogger.cache('lookup_started', {
@@ -420,7 +480,6 @@ class AudioCacheManager {
       );
 
       if (assets.length > 0) {
-        // Construct public URL
         const publicUrl = `https://pub-a28726938b5e40d5881029719fa8211c.r2.dev/${assets[0].r2_key}`;
         
         StructuredLogger.cache('cache_hit', {
@@ -448,7 +507,6 @@ class AudioCacheManager {
     }
   }
 
-  // Get multiple cached audio URLs in parallel
   async getCachedAudioBatch(organizationId, templateKeys) {
     try {
       const promises = templateKeys.map(key => 
@@ -481,15 +539,12 @@ class AudioCacheManager {
     }
   }
 
-  // Match AI response to cached audio templates
   matchResponseToCache(aiResponse, audioCache) {
     return this.responseMatching.findBestMatch(aiResponse, audioCache);
   }
 
-  // Get greeting audio with disclaimer
   async getGreetingAudio(organizationId, businessName) {
     try {
-      // Always use cached greeting with disclaimer
       let audioUrl = await this.getCachedAudio(organizationId, 'greeting');
       
       if (audioUrl) {
@@ -521,15 +576,12 @@ class AudioCacheManager {
     }
   }
 
-  // Handle confirmation responses
   async getConfirmationResponse(organizationId, customerResponse) {
     const responseLower = customerResponse.toLowerCase();
     
-    // Check for positive confirmation
     const positiveWords = ['okay', 'yes', 'sure', 'fine', 'alright', 'ok', 'good', 'sounds good'];
     const isPositive = positiveWords.some(word => responseLower.includes(word));
     
-    // Check for negative/hurry responses  
     const negativeWords = ['no', 'hurry', 'rush', 'fast', 'quick', 'busy', 'time'];
     const isNegative = negativeWords.some(word => responseLower.includes(word));
     
@@ -550,7 +602,7 @@ class AudioCacheManager {
           audioUrl,
           fromCache: true,
           text: 'I understand your concerns and respect your time. Please send us a text message with your full name, address, what appliance is having an issue, appliance make and model if you have it, and what issues you are noticing. We can get your appointment scheduled faster. Will that be okay?',
-          continueConversation: false // End call, direct to SMS
+          continueConversation: false
         };
       }
     }
@@ -645,64 +697,6 @@ class EnhancedDatabaseClient {
     });
   }
 
-  async logInteraction(data, ctx) {
-    if (!this.service) return;
-
-    // Background logging with error handling
-    ctx.waitUntil(
-      (async () => {
-        try {
-          await this.circuitBreaker.execute(async () => {
-            const request = new Request('http://internal/log', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(data)
-            });
-
-            const response = await this.service.fetch(request);
-            
-            if (!response.ok) {
-              throw new Error(`Logging failed: ${response.status}`);
-            }
-            
-            StructuredLogger.info('Interaction logged successfully');
-          });
-        } catch (error) {
-          StructuredLogger.error('Interaction logging failed', {
-            error: error.message,
-            organization_id: data.organizationId
-          });
-        }
-      })()
-    );
-  }
-
-  async updateFAQUsage(faqId, ctx) {
-    if (!this.service || !faqId) return;
-
-    ctx.waitUntil(
-      (async () => {
-        try {
-          await this.circuitBreaker.execute(async () => {
-            const request = new Request('http://internal/faq-usage', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ faqId: parseInt(faqId) })
-            });
-
-            await this.service.fetch(request);
-            StructuredLogger.info('FAQ usage updated', { faq_id: faqId });
-          });
-        } catch (error) {
-          StructuredLogger.error('FAQ usage update failed', {
-            error: error.message,
-            faq_id: faqId
-          });
-        }
-      })()
-    );
-  }
-
   async batchCall(operations) {
     const promises = operations.map(async (op) => {
       try {
@@ -766,7 +760,8 @@ class EnhancedAIClient {
         organization_id: organizationId,
         customer_phone: customerPhone,
         input_length: speechResult?.length || 0,
-        response_length: aiResponse.length
+        response_length: aiResponse.length,
+        completion_percentage: data.metadata?.completionPercentage || 0
       });
       
       return aiResponse;
@@ -834,7 +829,6 @@ class EnhancedElevenLabs {
             throw error;
           }
           
-          // Exponential backoff
           await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
         }
       }
@@ -898,7 +892,6 @@ class EnhancedR2Client {
             throw error;
           }
           
-          // Exponential backoff
           await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
         }
       }
@@ -907,7 +900,7 @@ class EnhancedR2Client {
 }
 
 // =============================================================================
-// INTELLIGENT FAQ MATCHER (ENHANCED)
+// INTELLIGENT FAQ MATCHER
 // =============================================================================
 
 class IntelligentFAQMatcher {
@@ -968,32 +961,52 @@ class IntelligentFAQMatcher {
 }
 
 // =============================================================================
-// MAIN VOICE CALL HANDLER - ENHANCED WITH AUDIO CACHE
+// MAIN VOICE CALL HANDLER - WITH DETAILED TIMING LOGS
 // =============================================================================
 
 async function handleEnhancedVoiceCall(request, env, ctx) {
+  // NEW: Add detailed timing logs
+  const log = (stage, startTime) => {
+    const duration = Date.now() - startTime;
+    console.log(`🕐 TIMING: ${stage} took ${duration}ms`);
+    return Date.now();
+  };
+
+  const twilioWebhookStart = Date.now();
   const totalStartTime = EnhancedPerformanceMonitor.startTimer();
   let stageTimer = totalStartTime;
+  let timer = Date.now();
   
   try {
-    // Validate environment first
     validateEnvironment(env);
+    timer = log('validate_environment', timer);
     
-    // Parse Twilio webhook data
     const contentType = request.headers.get('content-type') || '';
     if (!contentType.includes('application/x-www-form-urlencoded')) {
       throw new Error('Invalid content type for Twilio webhook');
     }
     
     const formData = await request.formData();
+    timer = log('parse_form_data', timer);
+    
     const speechResult = formData.get('SpeechResult');
     const customerPhone = formData.get('From');
     const businessPhone = formData.get('To');
     const callSid = formData.get('CallSid') || 'unknown';
     
+    const twilioProcessingTime = Date.now() - twilioWebhookStart;
+    EnhancedPerformanceMonitor.logTwilioLatency('webhook_processing', twilioProcessingTime, {
+      call_sid: callSid,
+      has_speech: !!speechResult,
+      form_data_size: Array.from(formData.entries()).length
+    });
+    
+    timer = log('extract_form_fields', timer);
+    
     stageTimer = EnhancedPerformanceMonitor.logStage('parse_webhook', stageTimer, {
       call_sid: callSid,
-      has_speech: !!speechResult
+      has_speech: !!speechResult,
+      twilio_processing_ms: twilioProcessingTime
     });
     
     StructuredLogger.info('Voice call received', {
@@ -1001,28 +1014,35 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       customer_phone: customerPhone,
       business_phone: businessPhone,
       speech_result: speechResult,
-      call_type: speechResult ? 'response' : 'initial'
+      call_type: speechResult ? 'response' : 'initial',
+      twilio_latency_ms: twilioProcessingTime
     });
 
-    // Initialize enhanced clients with direct Supabase for audio cache
+    // Initialize enhanced clients
     const dbClient = new EnhancedDatabaseClient(env.DATABASE_SERVICE);
     const directDb = new DirectSupabaseClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY);
     const aiClient = new EnhancedAIClient(env.AI_SERVICE);
     const elevenlabs = new EnhancedElevenLabs(env.ELEVENLABS_API_KEY);
     const r2Client = new EnhancedR2Client(env);
     const audioCache = new AudioCacheManager(dbClient, directDb);
+    
+    timer = log('initialize_clients', timer);
 
     // INITIAL CALL - Handle greeting with disclaimer
     if (!speechResult || speechResult === 'null') {
       StructuredLogger.info('Handling initial greeting with disclaimer', { call_sid: callSid });
       
       const organizationId = await dbClient.identifyOrganization(businessPhone);
+      timer = log('identify_organization', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('identify_org', stageTimer, {
         call_sid: callSid,
         organization_id: organizationId
       });
       
       const config = await dbClient.getOrganizationConfig(organizationId);
+      timer = log('get_organization_config', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('get_config', stageTimer, {
         call_sid: callSid,
         organization_id: organizationId
@@ -1030,8 +1050,9 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       
       const businessName = config?.business_name || "ABZ Appliance Repair";
       
-      // Try cached greeting with disclaimer first
       const cachedGreeting = await audioCache.getGreetingAudio(organizationId, businessName);
+      timer = log('check_greeting_cache', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('check_greeting_cache', stageTimer, {
         call_sid: callSid,
         cache_hit: !!cachedGreeting,
@@ -1041,8 +1062,9 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       let audioUrl;
       
       if (cachedGreeting && cachedGreeting.fromCache) {
-        // Use cached greeting - INSTANT RESPONSE
         audioUrl = cachedGreeting.audioUrl;
+        timer = log('use_cached_greeting', timer);
+        
         StructuredLogger.cache('greeting_served_from_cache', {
           call_sid: callSid,
           organization_id: organizationId,
@@ -1050,11 +1072,12 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
           disclaimer_included: true
         });
       } else {
-        // Fallback to ElevenLabs generation with disclaimer
         const greeting = `Hi, this is Sarah from ${businessName}. Before we proceed, I would like to let you know you are on a recorded line and my responses can take 4 to 5 seconds as I will be updating your records during our conversation, so for me to better assist you please be patient with me. Would that be okay with you?`;
         const voiceId = config?.elevenlabs_voice_id || env.DEFAULT_VOICE_ID;
         
         const audioBuffer = await elevenlabs.generateVoice(greeting, voiceId);
+        timer = log('generate_greeting_voice', timer);
+        
         stageTimer = EnhancedPerformanceMonitor.logStage('generate_voice', stageTimer, {
           call_sid: callSid,
           text_length: greeting.length
@@ -1062,22 +1085,27 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
         
         const filename = `greeting-disclaimer-${organizationId || 'default'}-${callSid}-${Date.now()}.mp3`;
         audioUrl = await r2Client.uploadAudio(audioBuffer, filename);
+        timer = log('upload_greeting_audio', timer);
+        
         stageTimer = EnhancedPerformanceMonitor.logStage('upload_audio', stageTimer, {
           call_sid: callSid,
           filename
         });
       }
       
+      timer = log('prepare_greeting_response', timer);
+      
       EnhancedPerformanceMonitor.logTotal(totalStartTime, callSid, {
         call_type: 'greeting_with_disclaimer',
         organization_id: organizationId,
-        used_cache: !!cachedGreeting
+        used_cache: !!cachedGreeting,
+        twilio_latency_ms: twilioProcessingTime
       });
       
       return new Response(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${audioUrl}</Play>
-  <Gather input="speech" timeout="8" speechTimeout="2" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US">
+  <Gather input="speech" timeout="6" speechTimeout="auto" speechModel="phone_call" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US" hints="washer,dryer,dishwasher,refrigerator,broken,leaking,repair">
   </Gather>
 </Response>`, {
         headers: { 'Content-Type': 'text/xml' }
@@ -1085,7 +1113,9 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
     }
 
     // Handle confirmation or regular conversation
-    const organizationId = await dbClient.identifyOrganization(businessPhone);
+    const organizationId = await this.directIdentifyOrganization(businessPhone, env);
+    timer = log('identify_organization_for_response', timer);
+    
     stageTimer = EnhancedPerformanceMonitor.logStage('identify_org', stageTimer, {
       call_sid: callSid,
       organization_id: organizationId
@@ -1108,6 +1138,7 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       });
 
       const confirmationResponse = await audioCache.getConfirmationResponse(organizationId, speechResult);
+      timer = log('get_confirmation_response', timer);
       
       if (confirmationResponse) {
         stageTimer = EnhancedPerformanceMonitor.logStage('confirmation_response', stageTimer, {
@@ -1118,20 +1149,20 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
         EnhancedPerformanceMonitor.logTotal(totalStartTime, callSid, {
           call_type: 'confirmation',
           organization_id: organizationId,
-          used_cache: true
+          used_cache: true,
+          twilio_latency_ms: twilioProcessingTime
         });
 
         if (confirmationResponse.continueConversation) {
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${confirmationResponse.audioUrl}</Play>
-  <Gather input="speech" timeout="6" speechTimeout="2" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US">
+  <Gather input="speech" timeout="6" speechTimeout="auto" speechModel="phone_call" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US" hints="washer,dryer,dishwasher,refrigerator,broken,leaking,repair">
   </Gather>
 </Response>`, {
             headers: { 'Content-Type': 'text/xml' }
           });
         } else {
-          // End call, direct to SMS
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${confirmationResponse.audioUrl}</Play>
@@ -1147,6 +1178,7 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       { type: 'config', organizationId },
       { type: 'faqs', organizationId }
     ]);
+    timer = log('load_config_and_faqs', timer);
 
     // Load common audio cache templates
     const commonTemplates = [
@@ -1154,6 +1186,7 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       'diagnostic_fee', 'common_issue', 'technician_intro', 'anything_else'
     ];
     const cachedAudio = await audioCache.getCachedAudioBatch(organizationId, commonTemplates);
+    timer = log('load_audio_cache_batch', timer);
     
     stageTimer = EnhancedPerformanceMonitor.logStage('load_data_and_cache', stageTimer, {
       call_sid: callSid,
@@ -1163,6 +1196,8 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
 
     // Try FAQ matching first
     const cachedFaq = IntelligentFAQMatcher.findBestMatch(faqs, speechResult);
+    timer = log('faq_matching', timer);
+    
     let aiResponse;
     let faqMatched = false;
     let faqId = null;
@@ -1175,13 +1210,14 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       
       if (cachedFaq.audio_url) {
         audioUrl = cachedFaq.audio_url;
+        timer = log('use_faq_audio', timer);
+        
         StructuredLogger.info('Using pre-recorded FAQ audio', {
           call_sid: callSid,
           audio_url: cachedFaq.audio_url
         });
       }
       
-      dbClient.updateFAQUsage(cachedFaq.id, ctx);
       stageTimer = EnhancedPerformanceMonitor.logStage('faq_processing', stageTimer, {
         call_sid: callSid,
         faq_id: cachedFaq.id
@@ -1189,18 +1225,23 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
     } else {
       // AI processing
       aiResponse = await aiClient.processMessage(speechResult, organizationId, customerPhone);
+      timer = log('ai_processing', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('ai_processing', stageTimer, {
         call_sid: callSid,
         organization_id: organizationId
       });
     }
 
-    // Check if AI response matches cached audio (if no FAQ audio found)
+    // Check if AI response matches cached audio (ONLY if no FAQ audio and NOT conversation flow)
     if (!audioUrl) {
       const matchedCache = audioCache.matchResponseToCache(aiResponse, cachedAudio);
+      timer = log('cache_matching', timer);
       
       if (matchedCache) {
         audioUrl = matchedCache.audioUrl;
+        timer = log('use_matched_cache', timer);
+        
         StructuredLogger.cache('ai_response_matched_to_cache', {
           call_sid: callSid,
           template_key: matchedCache.templateKey,
@@ -1212,6 +1253,12 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
           call_sid: callSid,
           template_key: matchedCache.templateKey
         });
+      } else {
+        StructuredLogger.info('No cache match - generating new audio', {
+          call_sid: callSid,
+          is_conversation_flow: audioCache.responseMatching.isConversationFlowResponse(aiResponse),
+          response_preview: aiResponse.substring(0, 50)
+        });
       }
     }
 
@@ -1219,6 +1266,8 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
     if (!audioUrl) {
       const voiceId = config?.elevenlabs_voice_id || env.DEFAULT_VOICE_ID;
       const audioBuffer = await elevenlabs.generateVoice(aiResponse, voiceId);
+      timer = log('generate_voice', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('voice_generation', stageTimer, {
         call_sid: callSid,
         text_length: aiResponse.length
@@ -1226,30 +1275,61 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
       
       const filename = `response-${organizationId || 'default'}-${callSid}-${Date.now()}.mp3`;
       audioUrl = await r2Client.uploadAudio(audioBuffer, filename);
+      timer = log('upload_audio', timer);
+      
       stageTimer = EnhancedPerformanceMonitor.logStage('audio_upload', stageTimer, {
         call_sid: callSid,
         filename
       });
     }
     
-    // Log interaction
+    // Log interaction directly to Supabase
     const totalProcessingTime = Date.now() - totalStartTime;
-    dbClient.logInteraction({
-      organizationId,
-      customerPhone,
-      speech: speechResult,
-      response: aiResponse,
-      processingTime: totalProcessingTime,
-      faqMatched,
-      faqId,
-      usedCache: !!audioUrl && !faqMatched
-    }, ctx);
+    timer = log('prepare_logging', timer);
+    
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const response = await fetch(`${env.SUPABASE_URL}/rest/v1/interactions`, {
+            method: 'POST',
+            headers: {
+              'apikey': env.SUPABASE_SERVICE_KEY,
+              'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              organization_id: organizationId,
+              customer_phone: customerPhone,
+              speech_input: speechResult,
+              ai_response: aiResponse,
+              processing_time_ms: totalProcessingTime,
+              // twilio_processing_time_ms: twilioProcessingTime,
+              channel: 'voice',
+              faq_matched: faqMatched,
+              faq_id: faqId,
+              //used_cache: !!audioUrl && !faqMatched
+            })
+          });
+          console.log(`📝 Logging response: ${response.status}`);
+          if (!response.ok) {
+            const error = await response.text();
+            console.error(`❌ Logging failed: ${error}`);
+          }
+        } catch (error) {
+          console.error(`❌ Logging error: ${error.message}`);
+        }
+      })()
+    );
+    
+    timer = log('log_interaction', timer);
 
     EnhancedPerformanceMonitor.logTotal(totalStartTime, callSid, {
       call_type: 'response',
       organization_id: organizationId,
       faq_matched: faqMatched,
-      used_cache: Object.keys(cachedAudio).length > 0
+      used_cache: Object.keys(cachedAudio).length > 0,
+      is_conversation_flow: audioCache.responseMatching.isConversationFlowResponse(aiResponse),
+      twilio_latency_ms: twilioProcessingTime
     });
 
     // Determine continuation
@@ -1263,13 +1343,22 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
                           responseCheck.includes('repair') ||
                           responseCheck.includes('service') ||
                           responseCheck.includes('available') ||
+                          responseCheck.includes('need') ||
+                          responseCheck.includes('callback') ||
+                          responseCheck.includes('address') ||
+                          responseCheck.includes('name') ||
+                          responseCheck.includes('city') ||
+                          responseCheck.includes('time') ||
                           faqMatched;
+
+    timer = log('prepare_final_response', timer);
+    console.log(`🕐 TOTAL CALL TIME: ${Date.now() - totalStartTime}ms`);
 
     if (shouldContinue) {
       return new Response(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${audioUrl}</Play>
-  <Gather input="speech" timeout="6" speechTimeout="2" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US">
+  <Gather input="speech" timeout="6" speechTimeout="auto" speechModel="phone_call" action="${new URL(request.url).origin}/voice" enhanced="true" language="en-US" hints="washer,dryer,dishwasher,refrigerator,broken,leaking,repair">
   </Gather>
 </Response>`, {
         headers: { 'Content-Type': 'text/xml' }
@@ -1284,6 +1373,8 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
     }
 
   } catch (error) {
+    console.log(`🕐 ERROR OCCURRED AT: ${Date.now() - totalStartTime}ms`);
+    
     StructuredLogger.error('Voice agent error', {
       error: error.message,
       stack: error.stack,
@@ -1292,13 +1383,65 @@ async function handleEnhancedVoiceCall(request, env, ctx) {
     
     EnhancedPerformanceMonitor.logTotal(totalStartTime, 'ERROR');
     
-    // Enhanced error response
     const businessName = "our service";
     const errorMessage = ErrorResponseManager.getVoiceErrorResponse(error, businessName);
     
     return new Response(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="alice">${errorMessage}</Say>
+</Response>`, {
+      headers: { 'Content-Type': 'text/xml' }
+    });
+  }
+}
+
+// =============================================================================
+// TWILIO LATENCY TEST ENDPOINT
+// =============================================================================
+
+async function handleLatencyTest(request, env, ctx) {
+  const testStart = Date.now();
+  
+  try {
+    const formData = await request.formData();
+    const callSid = formData.get('CallSid') || 'test-' + Date.now();
+    const from = formData.get('From') || '+1234567890';
+    const to = formData.get('To') || '+15714097776';
+    
+    const parseTime = Date.now() - testStart;
+    
+    const processingStart = Date.now();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const processingTime = Date.now() - processingStart;
+    
+    const totalTime = Date.now() - testStart;
+    
+    StructuredLogger.twilio('latency_test_completed', {
+      call_sid: callSid,
+      parse_time_ms: parseTime,
+      processing_time_ms: processingTime,
+      total_time_ms: totalTime,
+      test_timestamp: new Date().toISOString()
+    });
+    
+    return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Latency test completed in ${totalTime} milliseconds. Parse time: ${parseTime}ms. Processing time: ${processingTime}ms.</Say>
+</Response>`, {
+      headers: { 'Content-Type': 'text/xml' }
+    });
+    
+  } catch (error) {
+    const totalTime = Date.now() - testStart;
+    
+    StructuredLogger.error('Latency test failed', {
+      error: error.message,
+      total_time_ms: totalTime
+    });
+    
+    return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Latency test failed after ${totalTime} milliseconds. Error: ${error.message}</Say>
 </Response>`, {
       headers: { 'Content-Type': 'text/xml' }
     });
@@ -1316,23 +1459,124 @@ async function handleRequest(request, env, ctx) {
     return handleEnhancedVoiceCall(request, env, ctx);
   }
   
+  if (url.pathname === '/test-latency' && request.method === 'POST') {
+    return handleLatencyTest(request, env, ctx);
+  }
+  
+  if (url.pathname === '/test-db' && request.method === 'GET') {
+    try {
+      if (!env.DATABASE_SERVICE) {
+        return Response.json({ error: 'DATABASE_SERVICE binding missing' });
+      }
+      
+      const request = new Request('http://internal/health', {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      const response = await env.DATABASE_SERVICE.fetch(request);
+      const data = await response.text();
+      
+      return Response.json({ 
+        success: true, 
+        database_response: data,
+        binding_works: true 
+      });
+    } catch (error) {
+      return Response.json({ 
+        success: false, 
+        error: error.message,
+        binding_works: false 
+      });
+    }
+  }
+  
+  if (url.pathname === '/test-db-log' && request.method === 'POST') {
+    try {
+      const request = new Request('http://internal/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          organizationId: "86851e15-2618-4105-93be-0bfb023f1aec",
+          customerPhone: "+1234567890",
+          speech: "test from voice worker",
+          response: "test response",
+          processingTime: 1000,
+          faqMatched: false,
+          channel: "voice"
+        })
+      });
+
+      const response = await env.DATABASE_SERVICE.fetch(request);
+      const data = await response.text();
+      
+      return Response.json({ 
+        success: response.ok, 
+        status: response.status,
+        database_response: data
+      });
+    } catch (error) {
+      return Response.json({ 
+        success: false, 
+        error: error.message
+      });
+    }
+  }
+  
+  if (url.pathname === '/test-direct-log' && request.method === 'POST') {
+    try {
+      const response = await fetch(`${env.SUPABASE_URL}/rest/v1/interactions`, {
+        method: 'POST',
+        headers: {
+          'apikey': env.SUPABASE_SERVICE_KEY,
+          'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          organization_id: "86851e15-2618-4105-93be-0bfb023f1aec",
+          customer_phone: "+1234567890",
+          speech_input: "test direct from voice worker",
+          ai_response: "test response",
+          processing_time_ms: 1000,
+          channel: "voice",
+          faq_matched: false
+        })
+      });
+
+      const data = await response.text();
+      
+      return Response.json({ 
+        success: response.ok, 
+        status: response.status,
+        response: data
+      });
+    } catch (error) {
+      return Response.json({ 
+        success: false, 
+        error: error.message
+      });
+    }
+  }
+  
   if (url.pathname === '/health') {
     try {
       validateEnvironment(env);
       return Response.json({
         status: 'healthy',
-        version: '12.2.0-full-featured-with-disclaimer',
+        version: '14.1.0-detailed-timing-logs',
         timestamp: new Date().toISOString(),
         features: [
-          'disclaimer-greeting',
-          'confirmation-handling', 
-          'audio-cache-integration',
-          'intelligent-response-matching',
-          'parallel-cache-loading',
-          'performance-monitoring',
+          'detailed-timing-logs',
+          'twilio-latency-tracking',
+          'conversation-flow-priority',
+          'intelligent-cache-matching',
+          'conversation-flow-detection',
+          'enhanced-performance-monitoring',
           'faq-integration',
           'circuit-breaker-protection',
-          'advanced-error-handling'
+          'advanced-error-handling',
+          'latency-test-endpoint',
+          'direct-supabase-logging'
         ]
       });
     } catch (error) {
@@ -1346,70 +1590,96 @@ async function handleRequest(request, env, ctx) {
   
   if (url.pathname === '/status') {
     return new Response(`
-🎤 ENHANCED VOICE AGENT WORKER v12.2.0 - FULL FEATURED WITH DISCLAIMER
+🎤 ENHANCED VOICE AGENT WORKER v14.1.0 - WITH DETAILED TIMING LOGS
 
-🚀 COMPLETE FEATURE SET RESTORED + DISCLAIMER INTEGRATION
+🆕 NEW DETAILED TIMING FEATURES:
+✅ Stage-by-Stage Timing - Logs duration of each processing step
+✅ Bottleneck Identification - Shows exactly where delays occur
+✅ Detailed Console Logs - TIMING: [stage] took [X]ms format
+✅ Total Call Time - Complete end-to-end timing
+✅ Direct Supabase Logging - Bypasses broken database worker
 
-✅ ALL ADVANCED FEATURES RESTORED:
-- Performance monitoring with stage-by-stage timing
-- Intelligent response-to-cache matching  
-- FAQ integration with usage tracking
-- Circuit breaker protection for all services
-- Advanced error categorization and handling
-- Structured logging with performance alerts
-- Batch operations for parallel data loading
-- Smart conversation flow management
+🕐 TIMING BREAKDOWN TRACKING:
+1. validate_environment - Environment validation
+2. parse_form_data - Twilio form data parsing
+3. extract_form_fields - Field extraction from form
+4. initialize_clients - Client initialization
+5. identify_organization - Organization lookup
+6. get_organization_config - Config loading
+7. check_greeting_cache - Audio cache lookup
+8. load_config_and_faqs - Data loading
+9. load_audio_cache_batch - Batch cache loading
+10. faq_matching - FAQ pattern matching
+11. ai_processing - AI service call
+12. cache_matching - Response cache matching
+13. generate_voice - ElevenLabs voice generation
+14. upload_audio - R2 audio upload
+15. log_interaction - Database logging
+16. prepare_final_response - Response preparation
 
-✅ NEW DISCLAIMER FEATURES:
-- Professional disclaimer greeting with recording notice
-- Confirmation response handling (okay/yes vs no/hurry)
-- SMS alternative for customers in a hurry
-- Cached disclaimer audio for instant response
+📊 TIMING LOG FORMAT:
+🕐 TIMING: [stage_name] took [duration]ms
+🕐 TOTAL CALL TIME: [total_duration]ms
 
-🎯 VOICE CALL FLOW WITH DISCLAIMER:
-1. Initial Call → Disclaimer greeting (cached ~200ms)
-2. Customer Confirmation → "okay/yes" or "no/hurry"
-3. Positive Response → "Great! How can I help?" + continue
-4. Negative Response → SMS alternative message + end call
-5. Regular Conversation → Full AI + cache integration
+🔍 BOTTLENECK DETECTION:
+- Look for stages taking >1000ms in logs
+- Identify which stage causes 6-second delays
+- Compare cached vs non-cached response times
+- Track AI processing vs voice generation timing
 
-📊 PERFORMANCE MONITORING:
-- Critical alerts: >3s total call time
-- Warning alerts: >1.5s total call time
-- Stage-by-stage performance tracking
-- Cache hit/miss rate monitoring
-- FAQ usage analytics
+🚀 DEBUGGING WORKFLOW:
+1. Make voice call to +15714097776
+2. Say: "My washer is broken"
+3. Check Cloudflare Worker logs for timing breakdown
+4. Identify which stage takes 6+ seconds
+5. Focus optimization on that specific stage
 
-🔧 INTELLIGENT FEATURES:
-- Auto-match AI responses to cached audio
-- FAQ integration with pre-recorded responses
-- Circuit breaker protection prevents cascade failures
-- Advanced error handling with business context
-- Parallel data loading for optimal performance
+⚡ EXPECTED TIMING RANGES:
+- parse_form_data: <10ms
+- identify_organization: 50-200ms
+- load_config_and_faqs: 100-300ms
+- faq_matching: <50ms
+- ai_processing: 500-2000ms (main suspect)
+- generate_voice: 500-1500ms (main suspect)
+- upload_audio: 200-500ms
+- Total (cached): 500-1000ms
+- Total (AI + voice): 1000-3000ms
 
-⚡ EXPECTED PERFORMANCE:
-- Disclaimer greeting: ~200ms (cached)
-- Confirmation responses: ~300ms (cached)
-- FAQ matches: ~500ms (FAQ audio + cache)
-- AI responses with cache match: ~800ms
-- AI responses without cache: ~2-3s (was 7-8s)
-
-🎵 AUDIO CACHE INTEGRATION:
-- 20 cached audio templates available
-- Intelligent keyword-based response matching
-- Automatic fallback to ElevenLabs when needed
-- Performance monitoring for cache effectiveness
+🎯 LIKELY BOTTLENECKS:
+1. AI Processing (ai_processing stage)
+2. Voice Generation (generate_voice stage)
+3. Audio Upload (upload_audio stage)
+4. Config/FAQ Loading (load_data_and_cache stage)
 
 Worker URL: ${request.url}
 Health Check: ${request.url}/health
+Latency Test: ${request.url}/test-latency (POST)
+Database Test: ${request.url}/test-db
 
-🎤 PROFESSIONAL VOICE CALLS WITH DISCLAIMER COMPLIANCE! 🎤
+🕐 NOW WITH COMPLETE TIMING VISIBILITY - FIND THE 6-SECOND BOTTLENECK! 🕐
     `, {
       headers: { 'Content-Type': 'text/plain' }
     });
   }
   
   return new Response('Not Found', { status: 404 });
+}
+
+// ADD THIS FUNCTION HERE:
+async function directIdentifyOrganization(businessPhone, env) {
+  try {
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/tenant_configs?business_phone=eq.${encodeURIComponent(businessPhone)}&select=organization_id&limit=1`, {
+      headers: {
+        'apikey': env.SUPABASE_SERVICE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_SERVICE_KEY}`
+      }
+    });
+    
+    const data = await response.json();
+    return data[0]?.organization_id || '86851e15-2618-4105-93be-0bfb023f1aec';
+  } catch (error) {
+    return '86851e15-2618-4105-93be-0bfb023f1aec';
+  }
 }
 
 // Main export
